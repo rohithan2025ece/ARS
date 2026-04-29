@@ -1,81 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@android:color/black"
-    android:padding="0dp">
+    android:padding="16dp">
 
-    <!-- Top Bar -->
-    <RelativeLayout
+    <TextView
+        android:id="@+id/tvStatus"
         android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize"
-        android:background="#222222"
-        android:paddingHorizontal="10dp">
-
-        <ImageButton
-            android:id="@+id/backButton"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:layout_centerVertical="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@android:drawable/ic_menu_revert"
-            android:contentDescription="Back"
-            android:tint="@android:color/white"/>
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_centerInParent="true"
-            android:text="ARS Emergency"
-            android:textColor="@android:color/white"
-            android:textSize="18sp"
-            android:textStyle="bold"/>
-    </RelativeLayout>
+        android:layout_height="wrap_content"
+        android:text="Status: Initializing..."
+        android:textColor="#00FF00"
+        android:textSize="16sp"
+        android:gravity="center"
+        android:layout_marginBottom="10dp"/>
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:gravity="center"
-        android:padding="20dp">
+        android:background="#222222"
+        android:padding="12dp"
+        android:layout_marginBottom="20dp">
 
         <TextView
+            android:id="@+id/tvLat"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="ARS 🚨"
-            android:textSize="26sp"
-            android:textStyle="bold"
-            android:textColor="@android:color/white"
-            android:layout_marginBottom="20dp"/>
+            android:text="Latitude: --"
+            android:textColor="@android:color/white"/>
 
         <TextView
-            android:id="@+id/voiceText"
+            android:id="@+id/tvLon"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="🎤 Voice will appear here"
-            android:textSize="18sp"
-            android:gravity="center"
-            android:textColor="#BBBBBB"
-            android:layout_marginBottom="20dp"/>
+            android:text="Longitude: --"
+            android:textColor="@android:color/white"/>
 
         <TextView
-            android:id="@+id/locationText"
+            android:id="@+id/tvBattery"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="📍 Location"
-            android:gravity="center"
-            android:textColor="#AAAAAA"
-            android:layout_marginBottom="30dp"/>
+            android:text="Battery: --%"
+            android:textColor="@android:color/white"/>
 
-        <Button
-            android:id="@+id/sosButton"
-            android:text="SOS"
-            android:textSize="22sp"
-            android:layout_width="150dp"
-            android:layout_height="150dp"
-            android:backgroundTint="@android:color/holo_red_dark"
+        <TextView
+            android:id="@+id/tvTimestamp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Time: --"
             android:textColor="@android:color/white"/>
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/voiceText"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:text="🎤 Hold button to talk"
+        android:textSize="20sp"
+        android:gravity="center"
+        android:textColor="#BBBBBB"
+        android:layout_marginBottom="20dp"/>
+
+    <Button
+        android:id="@+id/sosButton"
+        android:layout_width="180dp"
+        android:layout_height="180dp"
+        android:layout_gravity="center"
+        android:text="SOS"
+        android:textSize="30sp"
+        android:textStyle="bold"
+        android:backgroundTint="#FF0000"
+        android:textColor="@android:color/white"
+        android:layout_marginBottom="40dp"/>
 
 </LinearLayout>
