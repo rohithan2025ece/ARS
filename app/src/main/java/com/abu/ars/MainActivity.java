@@ -2,9 +2,14 @@ package com.abu.ars;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.provider.Settings;
 import android.view.WindowManager;
 import android.media.MediaPlayer;
 import android.os.BatteryManager;
@@ -16,8 +21,10 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationRequest;
@@ -88,6 +95,10 @@ public class MainActivity extends AppCompatActivity {
     private int volumeClickCount = 0;
     private long lastVolumeClickTime = 0;
 
+    // Bluetooth Constants
+    private static final int REQUEST_BLUETOOTH_PERMISSION = 101;
+    private static final int REQUEST_ENABLE_BT = 102;
+
     @SuppressLint("ClickableViewAccessibility")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -104,6 +115,41 @@ public class MainActivity extends AppCompatActivity {
         }
 
         setContentView(R.layout.activity_main);
+
+        // --- AUTO ENABLE BLUETOOTH ---
+        BluetoothAdapter bluetoothAdapter;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+            bluetoothAdapter = bluetoothManager.getAdapter();
+        } else {
+            bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        }
+
+        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                // Android 9, 10, 11 — direct enable works
+                bluetoothAdapter.enable();
+            } else {
+                // Android 12+ — need runtime permission first
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                    // Permission already granted, enable directly
+                    bluetoothAdapter.enable();
+                } else {
+                    // Request permission first
+                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQUEST_BLUETOOTH_PERMISSION);
+                }
+            }
+        }
+
+        // --- AUTO ENABLE WIFI ---
+        WifiManager wifiManager = (WifiManager) getApplicationContext()
+                .getSystemService(Context.WIFI_SERVICE);
+
+        if (wifiManager != null && !wifiManager.isWifiEnabled()) {
+            // Android 10+ — only option is system panel
+            Intent wifiIntent = new Intent(Settings.Panel.ACTION_WIFI);
+            startActivityForResult(wifiIntent, 200);
+        }
 
         // 1. Initialize UI (Ensure these IDs exist in your activity_main.xml)
         voiceText = findViewById(R.id.voiceText);
@@ -277,8 +323,40 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == 1 && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startLocationUpdates();
+        if (requestCode == 1) {
+             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startLocationUpdates();
+            }
+        } else if (requestCode == REQUEST_BLUETOOTH_PERMISSION) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // Permission granted — now enable bluetooth
+                BluetoothAdapter bt;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+                    bt = bluetoothManager.getAdapter();
+                } else {
+                    bt = BluetoothAdapter.getDefaultAdapter();
+                }
+                if (bt != null && !bt.isEnabled()) {
+                    bt.enable();
+                }
+            } else {
+                // Permission denied — use Intent fallback
+                Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+                startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT);
+            }
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_ENABLE_BT) {
+            if (resultCode != RESULT_OK) {
+                // User still didn't enable BT, open settings as nuclear option
+                Intent intent = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS);
+                startActivity(intent);
+            }
         }
     }
 
