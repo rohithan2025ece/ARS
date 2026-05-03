@@ -12,6 +12,13 @@ import android.os.BatteryManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
+import android.telephony.SmsManager;
+import android.content.SharedPreferences;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
@@ -37,7 +44,10 @@ public class SOSService extends Service {
     private static final String CHANNEL_ID = "SOS_SERVICE_CHANNEL";
     private static final String ALERT_CHANNEL_ID = "SOS_ALERT_CHANNEL";
     private static final String TAG = "SOS_SERVICE";
-    private static final String BACKEND_URL = "https://defile-blip-snowbird.ngrok-free.dev/sos";
+    private static final String BACKEND_URL = "https://crisping-senate-flier.ngrok-free.dev/sos";
+    private static final String PRIMARY_CONTACT = "9940541394";
+    private static final String PREFS_NAME = "EmergencyContacts";
+    private static final String CONTACTS_KEY = "phone_numbers";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private FusedLocationProviderClient fusedLocationClient;
 
@@ -55,7 +65,14 @@ public class SOSService extends Service {
 
         if (intent != null && intent.getBooleanExtra("trigger_sos", false)) {
             String msg = intent.getStringExtra("sos_message");
-            triggerSOS(this, msg != null ? msg : "No voice message");
+            double lat = intent.getDoubleExtra("lat", 0.0);
+            double lon = intent.getDoubleExtra("lon", 0.0);
+            
+            if (lat != 0.0 && lon != 0.0) {
+                sendData(msg != null ? msg : "Manual Trigger", lat, lon);
+            } else {
+                triggerSOS(this, msg != null ? msg : "No voice message");
+            }
         }
 
         return START_STICKY;
@@ -92,7 +109,15 @@ public class SOSService extends Service {
 
     private void sendData(String message, double lat, double lon) {
         showTriggerNotification(message);
+        
+        if (!isNetworkAvailable()) {
+            Log.d(TAG, "No internet. Triggering SMS fallback.");
+            sendSMSFallback(message, lat, lon);
+            return;
+        }
+
         executor.execute(() -> {
+            boolean success = false;
             try {
                 // Battery
                 BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
@@ -103,11 +128,11 @@ public class SOSService extends Service {
                 sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
                 String timestamp = sdf.format(new Date());
 
-                // JSON Construction (Strict Keys, No Emojis)
+                // JSON Construction
                 JSONObject json = new JSONObject();
                 json.put("latitude", lat);
                 json.put("longitude", lon);
-                json.put("message", message.replaceAll("[^\\p{ASCII}]", "")); // Strip non-ASCII
+                json.put("message", message.replaceAll("[^\\p{ASCII}]", ""));
                 json.put("battery", battery);
                 json.put("timestamp", timestamp);
 
@@ -115,6 +140,7 @@ public class SOSService extends Service {
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
                 conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("ngrok-skip-browser-warning", "any");
                 conn.setDoOutput(true);
 
                 try (OutputStream os = conn.getOutputStream()) {
@@ -123,11 +149,88 @@ public class SOSService extends Service {
 
                 int code = conn.getResponseCode();
                 Log.d(TAG, "SOS Sent. Server response: " + code);
+                if (code == 200) success = true;
 
             } catch (Exception e) {
-                Log.e(TAG, "Failed to send SOS", e);
+                Log.e(TAG, "Failed to send SOS to server", e);
+            }
+
+            if (!success) {
+                Log.d(TAG, "Server delivery failed. Sending SMS fallback.");
+                sendSMSFallback(message, lat, lon);
             }
         });
+    }
+
+    private boolean isNetworkAvailable() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm != null) {
+            NetworkCapabilities capabilities = cm.getNetworkCapabilities(cm.getActiveNetwork());
+            return capabilities != null && (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || 
+                                          capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR));
+        }
+        return false;
+    }
+
+    private void sendSMSFallback(String message, double lat, double lon) {
+        try {
+            // 1. Prepare Data (Match Backend JSON Format)
+            BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
+            int battery = (bm != null) ? bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) : 0;
+
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+            sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+            String timestamp = sdf.format(new Date());
+
+            JSONObject json = new JSONObject();
+            json.put("latitude", lat);
+            json.put("longitude", lon);
+            json.put("message", message.replaceAll("[^\\p{ASCII}]", ""));
+            json.put("battery", battery);
+            json.put("timestamp", timestamp);
+
+            // Pretty print with 2-space indentation to match user request exactly
+            String smsBody = json.toString(2);
+
+            // 2. Verify Permission
+            if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+                Log.e(TAG, "SMS FAIL: Permission NOT granted");
+                return;
+            }
+
+            // 3. Get SmsManager
+            SmsManager smsManager;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                smsManager = getSystemService(SmsManager.class);
+            } else {
+                smsManager = SmsManager.getDefault();
+            }
+
+            if (smsManager == null) {
+                Log.e(TAG, "SMS FAIL: SmsManager is null");
+                return;
+            }
+
+            // 4. Collect numbers (Test + Primary + Saved Contacts)
+            Set<String> recipients = new HashSet<>();
+            recipients.add("8778064671"); // Test Number
+            recipients.add(PRIMARY_CONTACT); // "9940541394"
+            
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            Set<String> savedContacts = prefs.getStringSet(CONTACTS_KEY, new HashSet<>());
+            recipients.addAll(savedContacts);
+
+            // 5. Send to all
+            for (String number : recipients) {
+                if (number != null && !number.trim().isEmpty()) {
+                    ArrayList<String> parts = smsManager.divideMessage(smsBody);
+                    smsManager.sendMultipartTextMessage(number, null, parts, null, null);
+                    Log.d(TAG, "SMS SUCCESS: Sent JSON to " + number);
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "SMS FAIL: " + e.getMessage());
+        }
     }
 
     private void showTriggerNotification(String source) {
