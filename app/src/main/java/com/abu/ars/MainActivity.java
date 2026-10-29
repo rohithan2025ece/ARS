@@ -2,24 +2,33 @@ package com.abu.ars;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.PendingIntent;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothSocket;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.net.wifi.WifiManager;
-import android.os.Build;
-import android.provider.Settings;
-import android.view.WindowManager;
 import android.media.MediaPlayer;
+import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Looper;
+import android.provider.Settings;
+import android.telephony.SmsManager;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.WindowManager;
+import android.view.animation.Animation;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -32,7 +41,6 @@ import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.location.Priority;
-import android.os.Looper;
 
 import org.json.JSONObject;
 import org.vosk.Model;
@@ -49,8 +57,10 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -92,7 +102,11 @@ public class MainActivity extends AppCompatActivity {
 
     // Constants & Networking
     private static final String TAG = "SOS_APP";
-    private static final String BACKEND_URL = "https://defile-blip-snowbird.ngrok-free.dev/sos";
+    private static final String BACKEND_URL = "https://crisping-senate-flier.ngrok-free.dev/sos";
+    private static final String PREFS_NAME = "EmergencyContacts";
+    private static final String CONTACTS_KEY = "phone_numbers";
+    private static final String APP_PREFS = "AppPrefs";
+    private static final String IS_FIRST_TIME = "isFirstTime";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     // Volume Trigger Logic
@@ -183,11 +197,22 @@ public class MainActivity extends AppCompatActivity {
         setupLocationCallback();
 
         // 3. Request Permissions
-        ActivityCompat.requestPermissions(this, new String[]{
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION,
-                Manifest.permission.RECORD_AUDIO
-        }, 1);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.SEND_SMS,
+                    Manifest.permission.POST_NOTIFICATIONS
+            }, 1);
+        } else {
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.SEND_SMS
+            }, 1);
+        }
 
         // 4. Initialize Sounds
         try {
@@ -225,6 +250,9 @@ public class MainActivity extends AppCompatActivity {
         if (getIntent() != null && getIntent().getBooleanExtra("triggerSOS", false)) {
             triggerSOS("Accessibility Volume Trigger");
         }
+
+        // --- FIRST TIME SETUP CHECK ---
+        checkFirstTimeSetup();
     }
 
     @Override
@@ -385,7 +413,19 @@ public class MainActivity extends AppCompatActivity {
         double lon = lastLon;
         
         String finalMessage = spokenText.isEmpty() ? getString(R.string.emergency_message_format, source) : spokenText;
-        sendToServer(finalMessage, lat, lon);
+
+        // --- Start SOSService for background processing and SMS fallback ---
+        // The service handles both backend transmission and SMS fallback for consistency
+        Intent serviceIntent = new Intent(this, SOSService.class);
+        serviceIntent.putExtra("trigger_sos", true);
+        serviceIntent.putExtra("sos_message", finalMessage);
+        serviceIntent.putExtra("lat", lat);
+        serviceIntent.putExtra("lon", lon);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
 
         // Restart background listening after a short delay
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this::startListening, 3000);
@@ -399,8 +439,10 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> tvBattery.setText(getString(R.string.battery_format, batteryLevel)));
         }
 
-        // Current Timestamp
-        currentTimestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date());
+        // Current Timestamp (ISO 8601 for consistency with Backend/SMS)
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+        sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+        currentTimestamp = sdf.format(new Date());
         runOnUiThread(() -> tvTimestamp.setText(getString(R.string.timestamp_format, currentTimestamp)));
     }
 
@@ -477,41 +519,6 @@ public class MainActivity extends AppCompatActivity {
             speechService.stop();
             speechService = null;
         }
-    }
-
-    // ================= 🌐 BACKEND (POST JSON) =================
-
-    private void sendToServer(String message, double lat, double lon) {
-        executor.execute(() -> {
-            try {
-                URL url = new URL(BACKEND_URL);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setDoOutput(true);
-
-                // Prepare JSON payload
-                String json = String.format(Locale.US,
-                        "{\"latitude\": %.6f, \"longitude\": %.6f, \"message\": \"%s\", \"battery\": %d, \"timestamp\": \"%s\"}",
-                        lat, lon, message, batteryLevel, currentTimestamp);
-
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(json.getBytes());
-                }
-
-                int code = conn.getResponseCode();
-                runOnUiThread(() -> {
-                    tvStatus.setText(getString(R.string.status_alert_transmitted, code));
-                    Toast.makeText(MainActivity.this, R.string.sos_sent_success, Toast.LENGTH_LONG).show();
-                });
-
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    tvStatus.setText(R.string.status_network_error);
-                    Log.e(TAG, "Server Error", e);
-                });
-            }
-        });
     }
 
     // ================= 🛠 UTILITIES =================
@@ -591,5 +598,85 @@ public class MainActivity extends AppCompatActivity {
         if (startSound != null) startSound.release();
         if (stopSound != null) stopSound.release();
         executor.shutdown();
+    }
+
+    // ================= 📋 EMERGENCY CONTACTS HELPERS =================
+
+    /**
+     * Call this method to save a new emergency contact.
+     * Example: addEmergencyContact("1234567890");
+     */
+    private void addEmergencyContact(String phoneNumber) {
+        if (phoneNumber == null || phoneNumber.trim().isEmpty()) return;
+
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        // Must create a new HashSet because the returned set is immutable/linked to storage
+        Set<String> contacts = new HashSet<>(prefs.getStringSet(CONTACTS_KEY, new HashSet<>()));
+        
+        if (contacts.add(phoneNumber)) {
+            prefs.edit().putStringSet(CONTACTS_KEY, contacts).apply();
+            Log.d(TAG, "CONTACT SAVED: " + phoneNumber);
+            Log.d(TAG, "TOTAL CONTACTS: " + contacts.size());
+        } else {
+            Log.d(TAG, "CONTACT ALREADY EXISTS: " + phoneNumber);
+        }
+    }
+
+    /**
+     * Retrieves the current list of emergency contacts.
+     */
+    private Set<String> getEmergencyContacts() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        Set<String> contacts = prefs.getStringSet(CONTACTS_KEY, new HashSet<>());
+        Log.d(TAG, "RETRIEVED CONTACTS: " + contacts);
+        return contacts;
+    }
+
+    // ================= 🚀 FIRST-TIME SETUP LOGIC =================
+
+    private void checkFirstTimeSetup() {
+        SharedPreferences appPrefs = getSharedPreferences(APP_PREFS, MODE_PRIVATE);
+        boolean isFirstTime = appPrefs.getBoolean(IS_FIRST_TIME, true);
+
+        if (isFirstTime) {
+            showFirstTimeSetupDialog();
+        }
+    }
+
+    private void showFirstTimeSetupDialog() {
+        android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("e.g. 9876543210");
+        input.setInputType(android.text.InputType.TYPE_CLASS_PHONE);
+        
+        // Simple padding/container for the programmatic view
+        android.widget.FrameLayout container = new android.widget.FrameLayout(this);
+        android.widget.FrameLayout.LayoutParams params = new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT, 
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.leftMargin = 60;
+        params.rightMargin = 60;
+        params.topMargin = 20;
+        input.setLayoutParams(params);
+        container.addView(input);
+
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Emergency Contact Setup")
+                .setMessage("Welcome to ARS. Please enter your primary emergency contact number to get started:")
+                .setView(container)
+                .setCancelable(false) // Force setup on first run
+                .setPositiveButton("Save & Continue", (dialog, which) -> {
+                    String number = input.getText().toString().trim();
+                    if (!number.isEmpty()) {
+                        addEmergencyContact(number);
+                        // Mark setup as complete
+                        getSharedPreferences(APP_PREFS, MODE_PRIVATE)
+                                .edit().putBoolean(IS_FIRST_TIME, false).apply();
+                        Toast.makeText(this, "Setup Complete!", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Toast.makeText(this, "A contact number is required.", Toast.LENGTH_SHORT).show();
+                        showFirstTimeSetupDialog(); // Re-show if empty
+                    }
+                })
+                .show();
     }
 }
