@@ -20,7 +20,10 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
 import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+import android.os.Looper;
 
 import org.json.JSONObject;
 import org.vosk.Model;
@@ -46,11 +49,27 @@ public class MainActivity extends AppCompatActivity {
     // UI Elements
     private TextView voiceText, tvLat, tvLon, tvBattery, tvTimestamp, tvStatus;
     private Button sosButton;
+    private android.widget.ImageView pulseRing;
+
+    // Animations
+    private android.view.animation.Animation pulseScaleAnim, scanlineAnim;
 
     // Location & Device Info
     private FusedLocationProviderClient fusedLocationClient;
+    private com.google.android.gms.location.LocationCallback locationCallback;
     private int batteryLevel;
     private String currentTimestamp;
+    private double lastLat = 0.0, lastLon = 0.0;
+
+    // Periodic Updates
+    private final android.os.Handler uiHandler = new android.os.Handler();
+    private final Runnable uiUpdater = new Runnable() {
+        @Override
+        public void run() {
+            updateDeviceInfo();
+            uiHandler.postDelayed(this, 1000); // Update time/battery every second
+        }
+    };
 
     // Vosk Voice Recognition
     private Model voskModel;
@@ -94,13 +113,24 @@ public class MainActivity extends AppCompatActivity {
         tvTimestamp = findViewById(R.id.tvTimestamp);
         tvStatus = findViewById(R.id.tvStatus);
         sosButton = findViewById(R.id.sosButton);
+        pulseRing = findViewById(R.id.pulseRing);
+
+        // Load Animations
+        pulseScaleAnim = android.view.animation.AnimationUtils.loadAnimation(this, R.anim.pulse_scale);
+        scanlineAnim = android.view.animation.AnimationUtils.loadAnimation(this, R.anim.scanline_anim);
+        
+        // Start animations
+        pulseRing.startAnimation(pulseScaleAnim);
+        findViewById(R.id.scanline).startAnimation(scanlineAnim);
 
         // 2. Initialize Location
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        setupLocationCallback();
 
         // 3. Request Permissions
         ActivityCompat.requestPermissions(this, new String[]{
                 Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.RECORD_AUDIO
         }, 1);
 
@@ -121,14 +151,14 @@ public class MainActivity extends AppCompatActivity {
                 if (voskModel != null) {
                     if (startSound != null) startSound.start();
                     spokenText = ""; 
-                    voiceText.setText("Manual Recording...");
-                    tvStatus.setText("Status: Manual Alert...");
+                    voiceText.setText(R.string.manual_recording);
+                    tvStatus.setText(R.string.status_manual_alert);
                 } else {
-                    Toast.makeText(this, "Model loading...", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, R.string.model_loading, Toast.LENGTH_SHORT).show();
                 }
             } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
                 if (stopSound != null) stopSound.start();
-                triggerSOS("Manual Button Trigger");
+                triggerSOS(getString(R.string.trigger_manual));
             }
             return true;
         });
@@ -147,7 +177,7 @@ public class MainActivity extends AppCompatActivity {
         super.onNewIntent(intent);
         setIntent(intent); // Update activity intent
         if (intent.getBooleanExtra("triggerSOS", false)) {
-            triggerSOS("Accessibility Volume Trigger");
+            triggerSOS(getString(R.string.trigger_volume_accessibility));
         }
     }
 
@@ -164,7 +194,7 @@ public class MainActivity extends AppCompatActivity {
             lastVolumeClickTime = currentTime;
 
             if (volumeClickCount >= 3) {
-                triggerSOS("Volume Button Triple Press");
+                triggerSOS(getString(R.string.trigger_volume_triple));
                 volumeClickCount = 0; // Reset
             }
             return true; // Consume event to prevent default volume change while app is open
@@ -172,42 +202,106 @@ public class MainActivity extends AppCompatActivity {
         return super.onKeyDown(keyCode, event);
     }
 
+    private void startLocationUpdates() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+
+        // 1. Force an immediate fresh location fix (more reliable than getLastLocation)
+        fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                .addOnSuccessListener(location -> {
+                    if (location != null) {
+                        updateLocationUI(location.getLatitude(), location.getLongitude());
+                        tvStatus.setText(R.string.status_gps_synced);
+                    }
+                });
+
+        // 2. High-Accuracy Continuous Updates
+        LocationRequest locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000)
+                .setMinUpdateIntervalMillis(1000)
+                .setMaxUpdateDelayMillis(3000)
+                .build();
+
+        try {
+            fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper());
+        } catch (SecurityException e) {
+            Log.e(TAG, "Location permission error", e);
+        }
+    }
+
+    private void updateLocationUI(double lat, double lon) {
+        lastLat = lat;
+        lastLon = lon;
+        runOnUiThread(() -> {
+            tvLat.setText(getString(R.string.lat_format, lat));
+            tvLon.setText(getString(R.string.lon_format, lon));
+        });
+    }
+
+    private void setupLocationCallback() {
+        locationCallback = new com.google.android.gms.location.LocationCallback() {
+            @Override
+            public void onLocationResult(com.google.android.gms.location.LocationResult locationResult) {
+                if (locationResult == null) return;
+                for (android.location.Location location : locationResult.getLocations()) {
+                    if (location != null) {
+                        updateLocationUI(location.getLatitude(), location.getLongitude());
+                    }
+                }
+            }
+        };
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        uiHandler.post(uiUpdater);
+        
+        // Reset UI to indicate searching if we don't have a location yet
+        if (lastLat == 0.0) {
+            tvLat.setText(R.string.lat_acquiring);
+            tvLon.setText(R.string.lon_acquiring);
+        }
+
+        startLocationUpdates();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        uiHandler.removeCallbacks(uiUpdater);
+        fusedLocationClient.removeLocationUpdates(locationCallback);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 1 && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startLocationUpdates();
+        }
+    }
+
     // ================= 📍 SOS CORE LOGIC =================
 
     private void triggerSOS(String source) {
         stopSpeechService(); // Stop listening during processing
         runOnUiThread(() -> {
-            tvStatus.setText("Status: SOS Triggered!");
-            voiceText.setText("Source: " + source);
-            Toast.makeText(this, "SOS TRIGGERED: " + source, Toast.LENGTH_LONG).show();
+            tvStatus.setText(R.string.status_sos_triggered);
+            voiceText.setText(getString(R.string.source_format, source.toUpperCase()));
+            Toast.makeText(this, getString(R.string.status_sos_triggered) + " " + source, Toast.LENGTH_LONG).show();
         });
         updateDeviceInfo(); // Refresh battery and timestamp
 
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Location permission missing", Toast.LENGTH_SHORT).show();
-            return;
-        }
+        // Use the most recent location from the callback if possible
+        double lat = lastLat;
+        double lon = lastLon;
+        
+        String finalMessage = spokenText.isEmpty() ? getString(R.string.emergency_message_format, source) : spokenText;
+        sendToServer(finalMessage, lat, lon);
 
-        fusedLocationClient.getLastLocation().addOnSuccessListener(location -> {
-            if (location != null) {
-                double lat = location.getLatitude();
-                double lon = location.getLongitude();
-                
-                // Update UI Display
-                runOnUiThread(() -> {
-                    tvLat.setText("Lat: " + String.format(Locale.US, "%.6f", lat));
-                    tvLon.setText("Lon: " + String.format(Locale.US, "%.6f", lon));
-                });
-                
-                String finalMessage = spokenText.isEmpty() ? "Emergency (" + source + ")" : spokenText;
-                sendToServer(finalMessage, lat, lon);
-            } else {
-                // Fallback if location is null
-                sendToServer("Emergency! (Location unavailable)", 0.0, 0.0);
-            }
-            // Restart background listening after a short delay
-            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this::startListening, 3000);
-        });
+        // Restart background listening after a short delay
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this::startListening, 3000);
     }
 
     private void updateDeviceInfo() {
@@ -215,30 +309,30 @@ public class MainActivity extends AppCompatActivity {
         BatteryManager bm = (BatteryManager) getSystemService(BATTERY_SERVICE);
         if (bm != null) {
             batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
-            runOnUiThread(() -> tvBattery.setText("Battery: " + batteryLevel + "%"));
+            runOnUiThread(() -> tvBattery.setText(getString(R.string.battery_format, batteryLevel)));
         }
 
         // Current Timestamp
         currentTimestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date());
-        runOnUiThread(() -> tvTimestamp.setText("Time: " + currentTimestamp));
+        runOnUiThread(() -> tvTimestamp.setText(getString(R.string.timestamp_format, currentTimestamp)));
     }
 
     // ================= 🎤 VOSK VOICE TRIGGER =================
 
     private void initVosk() {
-        runOnUiThread(() -> tvStatus.setText("Status: Loading Voice Model..."));
+        runOnUiThread(() -> tvStatus.setText(R.string.status_loading_model));
         new Thread(() -> {
             try {
                 File modelDir = new File(getExternalFilesDir(null), "model");
                 if (!modelDir.exists()) copyAssets("model", modelDir);
                 voskModel = new Model(modelDir.getAbsolutePath());
                 runOnUiThread(() -> {
-                    tvStatus.setText("Status: Always Listening");
-                    voiceText.setText("Say 'Help' or 'SOS'");
+                    tvStatus.setText(R.string.status_active);
+                    voiceText.setText(R.string.listening_keywords);
                     startListening(); // Auto-start background detection
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> tvStatus.setText("Status: Voice Model Error"));
+                runOnUiThread(() -> tvStatus.setText(R.string.status_error_model));
                 Log.e(TAG, "Vosk Model Init Error", e);
             }
         }).start();
@@ -257,14 +351,14 @@ public class MainActivity extends AppCompatActivity {
                         String partial = json.optString("partial", "").toLowerCase();
                         
                         if (!partial.isEmpty()) {
-                            runOnUiThread(() -> voiceText.setText("Listening: " + partial));
+                            runOnUiThread(() -> voiceText.setText(getString(R.string.captured_format, partial.toUpperCase())));
                         }
 
                         // Expanded keywords for maximum sensitivity
                         String[] keywords = {"help", "sos", "emergency", "danger", "police", "save", "attack", "stop", "fire"};
                         for (String kw : keywords) {
                             if (partial.contains(kw)) {
-                                runOnUiThread(() -> triggerSOS("Voice Keyword (" + kw + ")"));
+                                runOnUiThread(() -> triggerSOS(getString(R.string.trigger_voice_format, kw)));
                                 break;
                             }
                         }
@@ -320,13 +414,13 @@ public class MainActivity extends AppCompatActivity {
 
                 int code = conn.getResponseCode();
                 runOnUiThread(() -> {
-                    tvStatus.setText("Status: Alert Sent (Server: " + code + ")");
-                    Toast.makeText(MainActivity.this, "Emergency Alert Sent Successfully!", Toast.LENGTH_LONG).show();
+                    tvStatus.setText(getString(R.string.status_alert_transmitted, code));
+                    Toast.makeText(MainActivity.this, R.string.sos_sent_success, Toast.LENGTH_LONG).show();
                 });
 
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    tvStatus.setText("Status: Network Error");
+                    tvStatus.setText(R.string.status_network_error);
                     Log.e(TAG, "Server Error", e);
                 });
             }
