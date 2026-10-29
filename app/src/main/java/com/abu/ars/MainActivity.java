@@ -3,7 +3,9 @@ package com.abu.ars;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -48,6 +50,8 @@ import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -95,7 +99,8 @@ public class MainActivity extends AppCompatActivity {
     private int volumeClickCount = 0;
     private long lastVolumeClickTime = 0;
 
-    // Bluetooth Constants
+    // Bluetooth
+    private BluetoothAdapter bluetoothAdapter;
     private static final int REQUEST_BLUETOOTH_PERMISSION = 101;
     private static final int REQUEST_ENABLE_BT = 102;
 
@@ -117,7 +122,6 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         // --- AUTO ENABLE BLUETOOTH ---
-        BluetoothAdapter bluetoothAdapter;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
             bluetoothAdapter = bluetoothManager.getAdapter();
@@ -125,19 +129,24 @@ public class MainActivity extends AppCompatActivity {
             bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         }
 
-        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-                // Android 9, 10, 11 — direct enable works
-                bluetoothAdapter.enable();
-            } else {
-                // Android 12+ — need runtime permission first
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                    // Permission already granted, enable directly
+        if (bluetoothAdapter != null) {
+            if (!bluetoothAdapter.isEnabled()) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                    // Android 9, 10, 11 — direct enable works
                     bluetoothAdapter.enable();
                 } else {
-                    // Request permission first
-                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQUEST_BLUETOOTH_PERMISSION);
+                    // Android 12+ — need runtime permission first
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                        // Permission already granted, enable directly
+                        bluetoothAdapter.enable();
+                        setupBluetoothAutoconnect();
+                    } else {
+                        // Request permission first
+                        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQUEST_BLUETOOTH_PERMISSION);
+                    }
                 }
+            } else {
+                setupBluetoothAutoconnect();
             }
         }
 
@@ -330,16 +339,16 @@ public class MainActivity extends AppCompatActivity {
         } else if (requestCode == REQUEST_BLUETOOTH_PERMISSION) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 // Permission granted — now enable bluetooth
-                BluetoothAdapter bt;
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     BluetoothManager bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-                    bt = bluetoothManager.getAdapter();
+                    bluetoothAdapter = bluetoothManager.getAdapter();
                 } else {
-                    bt = BluetoothAdapter.getDefaultAdapter();
+                    bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
                 }
-                if (bt != null && !bt.isEnabled()) {
-                    bt.enable();
+                if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled()) {
+                    bluetoothAdapter.enable();
                 }
+                setupBluetoothAutoconnect();
             } else {
                 // Permission denied — use Intent fallback
                 Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
@@ -520,6 +529,58 @@ public class MainActivity extends AppCompatActivity {
         }
         if (!outFile.exists()) outFile.mkdirs();
         for (String file : files) copyAssets(assetPath + "/" + file, new File(outFile, file));
+    }
+
+    private void setupBluetoothAutoconnect() {
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
+            // Check for Android 12+ permission requirement
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && 
+                androidx.core.app.ActivityCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+            
+            java.util.Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
+            if (pairedDevices != null && !pairedDevices.isEmpty()) {
+                for (BluetoothDevice device : pairedDevices) {
+                    connectToBluetoothDevice(device);
+                }
+            }
+        }
+    }
+
+    private void connectToBluetoothDevice(BluetoothDevice device) {
+        try {
+            java.util.UUID uuid = java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+            
+            // Final check for name access (required for Android 12+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && 
+                androidx.core.app.ActivityCompat.checkSelfPermission(this, android.Manifest.permission.BLUETOOTH_CONNECT) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+
+            final String deviceName = device.getName();
+            final BluetoothSocket socket = device.createRfcommSocketToServiceRecord(uuid);
+
+            new Thread(() -> {
+                try {
+                    if (bluetoothAdapter != null) {
+                        bluetoothAdapter.cancelDiscovery();
+                    }
+                    socket.connect();
+                    
+                    // Alert the user of success
+                    runOnUiThread(() -> {
+                        android.widget.Toast.makeText(MainActivity.this, "Connected to: " + deviceName, android.widget.Toast.LENGTH_SHORT).show();
+                    });
+                } catch (Exception e) {
+                    android.util.Log.e("ARS_BT", "Silent fail: " + deviceName);
+                    try { socket.close(); } catch (Exception ignored) {}
+                }
+            }).start();
+        } catch (Exception e) {
+            android.util.Log.e("ARS_BT", "Socket error: " + e.getMessage());
+        }
     }
 
     @Override
